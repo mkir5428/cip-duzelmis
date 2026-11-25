@@ -89,6 +89,7 @@ public final class MainActivity extends Activity {
     private static final String KEYSTORE_ALIAS = "cip_api_key";
 
     private final ExecutorService network = Executors.newSingleThreadExecutor();
+    private final ConversationHistory conversationHistory = new ConversationHistory();
     private SharedPreferences preferences;
     private LinearLayout conversation;
     private ScrollView conversationScroll;
@@ -1286,10 +1287,15 @@ public final class MainActivity extends Activity {
         pauseWakeWordService();
         setBusy(true);
         final String command = text;
+        final String history = conversationHistory.toJson();
         network.execute(() -> {
             try {
-                String answer = postForm("/komut", "text", command, "session", sessionId());
-                runOnUiThread(() -> showAnswer(answer));
+                String answer = postForm(
+                        "/komut", "text", command, "session", sessionId(), "gecmis", history);
+                runOnUiThread(() -> {
+                    conversationHistory.addTurn(command, answer);
+                    showAnswer(answer);
+                });
             } catch (Exception error) {
                 runOnUiThread(() -> showError(error));
             } finally {
@@ -1556,14 +1562,18 @@ public final class MainActivity extends Activity {
     private void uploadRecording(File audioFile) {
         setBusy(true);
         addMessage("Sen", "🎙 Ses gönderiliyor...");
+        final String history = conversationHistory.toJson();
         network.execute(() -> {
             try {
-                JSONObject result = postAudio(audioFile);
+                JSONObject result = postAudio(audioFile, history);
                 String transcript = result.optString("transkript", "");
                 String answer = result.optString("cevap", "");
                 runOnUiThread(() -> {
                     if (!transcript.isEmpty()) {
                         addMessage("Sen", transcript);
+                        if (!answer.isEmpty()) {
+                            conversationHistory.addTurn(transcript, answer);
+                        }
                     }
                     showAnswer(answer.isEmpty() ? "Bir yanıt alınamadı." : answer);
                 });
@@ -1594,7 +1604,7 @@ public final class MainActivity extends Activity {
         return readResponse(connection);
     }
 
-    private JSONObject postAudio(File audioFile) throws Exception {
+    private JSONObject postAudio(File audioFile, String history) throws Exception {
         String boundary = "CipBoundary" + UUID.randomUUID().toString().replace("-", "");
         HttpURLConnection connection = openConnection("/ses?format=json");
         connection.setRequestMethod("POST");
@@ -1603,6 +1613,7 @@ public final class MainActivity extends Activity {
         try (OutputStream output = connection.getOutputStream();
              FileInputStream input = new FileInputStream(audioFile)) {
             writeFormPart(output, boundary, "session", sessionId());
+            writeFormPart(output, boundary, "gecmis", history);
             output.write(("--" + boundary + "\r\n"
                     + "Content-Disposition: form-data; name=\"file\"; filename=\"recording.m4a\"\r\n"
                     + "Content-Type: audio/mp4\r\n\r\n").getBytes(StandardCharsets.UTF_8));
