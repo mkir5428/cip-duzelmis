@@ -60,6 +60,15 @@ açık olduğu sürece konuşma bağlamı korunur; bu geçmiş Android ayarları
 sunucu diskine kaydedilmez. “Sohbet hafızasını temizle” isteği istemcideki bu
 geçici geçmişi de siler.
 
+Android'de sürekli dinleme kullanıcı tarafından başlatılmış, mikrofon türünde
+ön plan hizmeti olarak sürerken uyandırma sözcüğünden sonraki sohbet komutu
+Activity'nin yeniden açılmasını beklemeden sunucuya gönderilir; Çip yanıtı sesli
+okur ve bildirimde işlem durumunu gösterir. Dosya seçme, arama ve takvim gibi
+Android sistem arayüzü veya kullanıcı onayı gerektiren eylemler, Android'in
+arka plan Activity kısıtlarına uyar ve bildirimden uygulamayı açmayı gerektirir.
+İşletim sistemi/pil yöneticisi mikrofon hizmetini durdurabilir; bildirimde
+dinleme durumunu kontrol et ve gerekirse Çip'te yeniden başlat.
+
 ## Windows çalışma alanı değişiklik planı
 
 `POST /workspace/plan` mevcut API anahtarıyla kimlik doğrular ve HTTPS gerektirir.

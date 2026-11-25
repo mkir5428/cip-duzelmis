@@ -220,6 +220,7 @@ ASISTAN_ARACLARI = [
 
 ASISTAN_ARAC_CAGRI_SINIRI = 2
 ASISTAN_ARAC_TUR_SINIRI = 2
+ASISTAN_MAX_YANIT_TOKEN = 4096
 
 
 def simdi_metni() -> str:
@@ -237,7 +238,7 @@ def claude_cevap(metin: str, gecmis: list = None, profil: str = "") -> str:
     for tur in range(ASISTAN_ARAC_TUR_SINIRI + 1):
         yanit = claude_istemci().messages.create(
             model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5"),
-            max_tokens=1200,
+            max_tokens=ASISTAN_MAX_YANIT_TOKEN,
             system=sistem,
             tools=ASISTAN_ARACLARI,
             messages=mesajlar,

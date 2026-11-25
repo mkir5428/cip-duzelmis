@@ -89,7 +89,7 @@ public final class MainActivity extends Activity {
     private static final String KEYSTORE_ALIAS = "cip_api_key";
 
     private final ExecutorService network = Executors.newSingleThreadExecutor();
-    private final ConversationHistory conversationHistory = new ConversationHistory();
+    private final ConversationHistory conversationHistory = ConversationHistory.shared();
     private SharedPreferences preferences;
     private LinearLayout conversation;
     private ScrollView conversationScroll;
@@ -99,6 +99,7 @@ public final class MainActivity extends Activity {
     private Button wakeWordButton;
     private TextView wakeIndicator;
     private TextView wakeStatus;
+    private TextView assistantThinking;
     private TextView transferStatus;
     private Button transferToggleButton;
     private LinearLayout transferContent;
@@ -118,6 +119,8 @@ public final class MainActivity extends Activity {
     private TransferCredentialStore transferCredentialStore;
     private final WindowsActionApproval transferApproval = new AndroidBiometricApproval();
     private final Handler transferHandler = new Handler(Looper.getMainLooper());
+    private final Handler assistantStatusHandler = new Handler(Looper.getMainLooper());
+    private int assistantThinkingDots;
     private TransferAction transferActionAwaitingSave;
     private File transferDownloadFile;
     private TransferAction transferActionAwaitingUpload;
@@ -133,13 +136,33 @@ public final class MainActivity extends Activity {
         }
     };
 
+    private final Runnable assistantThinkingRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!busy || assistantThinking == null) {
+                return;
+            }
+            assistantThinkingDots = (assistantThinkingDots + 1) % 4;
+            assistantThinking.setText("Çip düşünüyor" + ".".repeat(assistantThinkingDots));
+            assistantStatusHandler.postDelayed(this, 450);
+        }
+    };
+
     private final BroadcastReceiver wakeReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
             if (WakeWordService.ACTION_STATUS.equals(intent.getAction())) {
                 updateWakeStatus(intent.getStringExtra(WakeWordService.EXTRA_STATUS));
             } else if (WakeWordService.ACTION_COMMAND.equals(intent.getAction())) {
-                handlePendingWakeCommand(intent.getStringExtra(WakeWordService.EXTRA_COMMAND));
+                showWakeCommandStarted(intent.getStringExtra(WakeWordService.EXTRA_COMMAND));
+            } else if (WakeWordService.ACTION_LOCAL_COMMAND.equals(intent.getAction())) {
+                String command = intent.getStringExtra(WakeWordService.EXTRA_COMMAND);
+                preferences.edit().remove(WakeWordService.PENDING_NATIVE_COMMAND).apply();
+                handleAssistantCommand(command);
+            } else if (WakeWordService.ACTION_RESULT.equals(intent.getAction())) {
+                showWakeCommandResult(
+                        intent.getStringExtra(WakeWordService.EXTRA_COMMAND),
+                        intent.getStringExtra(WakeWordService.EXTRA_ANSWER));
             }
         }
     };
@@ -258,11 +281,16 @@ public final class MainActivity extends Activity {
         chatPanel.setElevation(dp(2));
         LinearLayout chatHeader = new LinearLayout(this);
         chatHeader.setGravity(Gravity.CENTER_VERTICAL);
+        android.widget.ImageView assistantLogo = new android.widget.ImageView(this);
+        assistantLogo.setImageResource(R.drawable.ic_cip_legacy);
+        assistantLogo.setContentDescription("Çip logosu");
+        chatHeader.addView(assistantLogo, new LinearLayout.LayoutParams(dp(34), dp(34)));
         TextView conversationTitle = new TextView(this);
         conversationTitle.setText(R.string.conversation_title);
         conversationTitle.setTextSize(17);
         conversationTitle.setTextColor(0xFFE8F1F6);
         conversationTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        conversationTitle.setPadding(dp(8), 0, 0, 0);
         chatHeader.addView(conversationTitle, new LinearLayout.LayoutParams(0, -2, 1));
         TextView onlineLabel = new TextView(this);
         onlineLabel.setText(R.string.conversation_ready);
@@ -270,6 +298,15 @@ public final class MainActivity extends Activity {
         onlineLabel.setTextColor(0xFF65E2B6);
         chatHeader.addView(onlineLabel);
         chatPanel.addView(chatHeader);
+
+        assistantThinking = new TextView(this);
+        assistantThinking.setText("Çip düşünüyor…");
+        assistantThinking.setTextSize(13);
+        assistantThinking.setTextColor(0xFF70E7BD);
+        assistantThinking.setPadding(dp(6), dp(6), dp(6), dp(2));
+        assistantThinking.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        assistantThinking.setVisibility(View.GONE);
+        chatPanel.addView(assistantThinking);
 
         conversation = new LinearLayout(this);
         conversation.setOrientation(LinearLayout.VERTICAL);
@@ -1396,12 +1433,23 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void handlePendingWakeCommand(String command) {
-        preferences.edit().remove(WakeWordService.PENDING_COMMAND).apply();
-        updateWakeStatus("Uyandırma sözcüğü algılandı.");
+    private void showWakeCommandStarted(String command) {
         if (command != null && !command.trim().isEmpty()) {
-            handleAssistantCommand(command);
+            addMessage("Sen", command);
         }
+        setBusy(true);
+    }
+
+    private void showWakeCommandResult(String command, String answer) {
+        if (answer != null && !answer.isEmpty()) {
+            if (answer.startsWith("Şu an yanıt oluşturamadım.")
+                    || answer.startsWith("İstek tamamlanamadı.")) {
+                addMessage("Hata", answer);
+            } else {
+                addMessage("Çip", answer);
+            }
+        }
+        setBusy(false);
     }
 
     private void handleAssistantCommand(String command) {
@@ -1746,6 +1794,15 @@ public final class MainActivity extends Activity {
         recordButton.setEnabled(!value);
         sendButton.setText(value ? "Bekle..." : "Gönder");
         sendButton.setAlpha(value ? 0.65f : 1f);
+        if (assistantThinking != null) {
+            assistantStatusHandler.removeCallbacks(assistantThinkingRunnable);
+            assistantThinking.setVisibility(value ? View.VISIBLE : View.GONE);
+            if (value) {
+                assistantThinkingDots = 0;
+                assistantThinking.setText("Çip düşünüyor");
+                assistantStatusHandler.postDelayed(assistantThinkingRunnable, 450);
+            }
+        }
     }
 
     private boolean ensureConfigured() {
@@ -1892,6 +1949,8 @@ public final class MainActivity extends Activity {
         IntentFilter filter = new IntentFilter();
         filter.addAction(WakeWordService.ACTION_STATUS);
         filter.addAction(WakeWordService.ACTION_COMMAND);
+        filter.addAction(WakeWordService.ACTION_LOCAL_COMMAND);
+        filter.addAction(WakeWordService.ACTION_RESULT);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(wakeReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
@@ -1906,9 +1965,11 @@ public final class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        String pendingCommand = preferences.getString(WakeWordService.PENDING_COMMAND, "");
-        if (!pendingCommand.isEmpty()) {
-            handlePendingWakeCommand(pendingCommand);
+        String pendingNativeCommand = preferences.getString(
+                WakeWordService.PENDING_NATIVE_COMMAND, "");
+        if (!pendingNativeCommand.isEmpty()) {
+            preferences.edit().remove(WakeWordService.PENDING_NATIVE_COMMAND).apply();
+            handleAssistantCommand(pendingNativeCommand);
         }
         transferPollEnabled = true;
         transferHandler.removeCallbacks(transferPollRunnable);
@@ -1977,6 +2038,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         transferHandler.removeCallbacksAndMessages(null);
+        assistantStatusHandler.removeCallbacksAndMessages(null);
         if (isFinishing()) {
             deletePendingTransferDownload();
             deletePendingTransferUpload();

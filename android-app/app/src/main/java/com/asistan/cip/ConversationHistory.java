@@ -11,6 +11,7 @@ import java.util.regex.Pattern;
 final class ConversationHistory {
     private static final int MAX_MESSAGES = 40;
     private static final int MAX_CONTENT_CHARACTERS = 2000;
+    private static final ConversationHistory SHARED = new ConversationHistory();
     private static final Pattern CLEAR_WORDS =
             Pattern.compile("\\b(temizle|sifirla|sil|unut|resetle)\\b");
     private static final Pattern MEMORY_WORDS =
@@ -18,11 +19,15 @@ final class ConversationHistory {
 
     private final List<JSONObject> messages = new ArrayList<>();
 
-    String toJson() {
+    static ConversationHistory shared() {
+        return SHARED;
+    }
+
+    synchronized String toJson() {
         return new JSONArray(messages).toString();
     }
 
-    void addTurn(String userText, String assistantText) {
+    synchronized void addTurn(String userText, String assistantText) {
         String normalized = WakeCommandParser.normalize(userText);
         if (CLEAR_WORDS.matcher(normalized).find() && MEMORY_WORDS.matcher(normalized).find()) {
             messages.clear();

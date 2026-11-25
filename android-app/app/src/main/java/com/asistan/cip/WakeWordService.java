@@ -14,9 +14,15 @@ import android.os.Looper;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
+import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Locale;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public final class WakeWordService extends Service {
     static final String ACTION_START = "com.asistan.cip.action.START_WAKE";
@@ -25,18 +31,27 @@ public final class WakeWordService extends Service {
     static final String ACTION_RESUME = "com.asistan.cip.action.RESUME_WAKE";
     static final String ACTION_STATUS = "com.asistan.cip.action.WAKE_STATUS";
     static final String ACTION_COMMAND = "com.asistan.cip.action.WAKE_COMMAND";
+    static final String ACTION_LOCAL_COMMAND = "com.asistan.cip.action.WAKE_LOCAL_COMMAND";
+    static final String ACTION_RESULT = "com.asistan.cip.action.WAKE_RESULT";
     static final String EXTRA_STATUS = "status";
     static final String EXTRA_COMMAND = "command";
+    static final String EXTRA_ANSWER = "answer";
     static final String PENDING_COMMAND = "pending_wake_command";
+    static final String PENDING_NATIVE_COMMAND = "pending_native_wake_command";
 
     private static final String CHANNEL_ID = "cip_wake_word";
     private static final int NOTIFICATION_ID = 7301;
     private static volatile boolean running;
 
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final ExecutorService assistantExecutor = Executors.newSingleThreadExecutor();
+    private final ArrayDeque<String> speechQueue = new ArrayDeque<>();
     private SpeechRecognizer speechRecognizer;
+    private TextToSpeech textToSpeech;
     private boolean armed;
     private boolean paused;
+    private boolean assistantBusy;
+    private boolean textToSpeechReady;
     private String notificationStatus = "Hey Çip için cihaz üstünde dinleme açık.";
 
     static boolean isRunning() {
@@ -49,6 +64,28 @@ public final class WakeWordService extends Service {
         running = true;
         createNotificationChannel();
         startForeground(NOTIFICATION_ID, buildNotification(notificationStatus));
+        textToSpeech = new TextToSpeech(this, status -> {
+            if (status == TextToSpeech.SUCCESS && textToSpeech != null) {
+                int languageStatus = textToSpeech.setLanguage(new Locale("tr", "TR"));
+                textToSpeechReady = languageStatus != TextToSpeech.LANG_MISSING_DATA
+                        && languageStatus != TextToSpeech.LANG_NOT_SUPPORTED;
+            }
+            if (textToSpeech != null) {
+                textToSpeech.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                    @Override public void onStart(String utteranceId) { }
+
+                    @Override
+                    public void onDone(String utteranceId) {
+                        main.post(WakeWordService.this::speakNextChunk);
+                    }
+
+                    @Override
+                    public void onError(String utteranceId) {
+                        main.post(WakeWordService.this::speakNextChunk);
+                    }
+                });
+            }
+        });
     }
 
     @Override
@@ -56,13 +93,13 @@ public final class WakeWordService extends Service {
         String action = intent == null ? ACTION_START : intent.getAction();
         if (ACTION_STOP.equals(action)) {
             stopListening();
-            return START_NOT_STICKY;
+            return START_STICKY;
         }
         if (ACTION_PAUSE.equals(action)) {
             paused = true;
             cancelRecognition();
             publishStatus("Dinleme geçici olarak duraklatıldı.");
-            return START_NOT_STICKY;
+            return START_STICKY;
         }
         if (ACTION_RESUME.equals(action)) {
             paused = false;
@@ -73,10 +110,15 @@ public final class WakeWordService extends Service {
                     + "Android 12+ ve çevrimdışı Türkçe dil desteği gerekir.");
             return START_NOT_STICKY;
         }
-        if (!paused) {
+        String pending = intent == null
+                ? getSharedPreferences("cip_settings", MODE_PRIVATE).getString(PENDING_COMMAND, "")
+                : "";
+        if (!pending.isEmpty()) {
+            runAssistantCommand(pending);
+        } else if (!paused) {
             startRecognition();
         }
-        return START_NOT_STICKY;
+        return START_STICKY;
     }
 
     @TargetApi(Build.VERSION_CODES.S)
@@ -157,16 +199,123 @@ public final class WakeWordService extends Service {
         }
         if (!command.isEmpty()) {
             paused = true;
+            cancelRecognition();
+            if (DeviceCommandRouter.route(command) != null) {
+                getSharedPreferences("cip_settings", MODE_PRIVATE).edit()
+                        .putString(PENDING_NATIVE_COMMAND, command).apply();
+                publishStatus("Bu işlem için dokunup Çip'i aç.");
+                Intent localCommand = new Intent(ACTION_LOCAL_COMMAND)
+                        .setPackage(getPackageName())
+                        .putExtra(EXTRA_COMMAND, command);
+                sendBroadcast(localCommand);
+                return;
+            }
             getSharedPreferences("cip_settings", MODE_PRIVATE).edit()
                     .putString(PENDING_COMMAND, command).apply();
-            publishStatus("Komut alındı. Uygulama açıldığında işlenecek.");
+            publishStatus("Çip düşünüyor…");
             Intent broadcast = new Intent(ACTION_COMMAND)
                     .setPackage(getPackageName())
                     .putExtra(EXTRA_COMMAND, command);
             sendBroadcast(broadcast);
+            runAssistantCommand(command);
             return;
         }
         main.postDelayed(this::startRecognition, 250);
+    }
+
+    private void runAssistantCommand(String command) {
+        if (assistantBusy || command == null || command.trim().isEmpty()) {
+            return;
+        }
+        assistantBusy = true;
+        paused = true;
+        publishStatus("Çip düşünüyor…");
+        String history = ConversationHistory.shared().toJson();
+        String session = getSharedPreferences("cip_settings", MODE_PRIVATE)
+                .getString("session_id", "");
+        assistantExecutor.execute(() -> {
+            String answer;
+            boolean succeeded = false;
+            try {
+                answer = AssistantApiClient.sendCommand(this, command, session, history);
+                succeeded = true;
+            } catch (Exception error) {
+                answer = "İstek tamamlanamadı. Bağlantını ve sunucu ayarlarını kontrol edip tekrar dene.";
+            }
+            String result = answer;
+            boolean completed = succeeded;
+            getSharedPreferences("cip_settings", MODE_PRIVATE).edit()
+                    .remove(PENDING_COMMAND).apply();
+            if (completed) {
+                ConversationHistory.shared().addTurn(command, result);
+            }
+            main.post(() -> {
+                assistantBusy = false;
+                Intent broadcast = new Intent(ACTION_RESULT)
+                        .setPackage(getPackageName())
+                        .putExtra(EXTRA_COMMAND, command)
+                        .putExtra(EXTRA_ANSWER, result);
+                sendBroadcast(broadcast);
+                if (textToSpeechReady && textToSpeech != null && !result.isEmpty()) {
+                    notificationStatus = "Çip yanıtlıyor…";
+                    NotificationManager manager = getSystemService(NotificationManager.class);
+                    if (manager != null) {
+                        manager.notify(NOTIFICATION_ID, buildNotification(notificationStatus));
+                    }
+                    speakAssistantReply(result);
+                } else {
+                    resumeAfterAssistantReply();
+                }
+            });
+        });
+    }
+
+    private void resumeAfterAssistantReply() {
+        if (!running) {
+            return;
+        }
+        speechQueue.clear();
+        paused = false;
+        armed = false;
+        publishStatus("Yanıt hazır. Hey Çip için cihaz üstünde dinliyorum.");
+        main.postDelayed(this::startRecognition, 700);
+    }
+
+    private void speakAssistantReply(String text) {
+        speechQueue.clear();
+        int start = 0;
+        while (start < text.length()) {
+            int end = Math.min(start + 3500, text.length());
+            if (end < text.length()) {
+                int boundary = text.lastIndexOf(' ', end);
+                if (boundary > start) {
+                    end = boundary;
+                }
+            }
+            String chunk = text.substring(start, end).trim();
+            if (!chunk.isEmpty()) {
+                speechQueue.addLast(chunk);
+            }
+            start = end;
+        }
+        speakNextChunk();
+    }
+
+    private void speakNextChunk() {
+        if (!running) {
+            speechQueue.clear();
+            return;
+        }
+        String chunk = speechQueue.pollFirst();
+        if (chunk == null) {
+            resumeAfterAssistantReply();
+            return;
+        }
+        int result = textToSpeech.speak(chunk, TextToSpeech.QUEUE_FLUSH, null,
+                "cip-wake-" + UUID.randomUUID());
+        if (result == TextToSpeech.ERROR) {
+            main.post(this::speakNextChunk);
+        }
     }
 
     private void cancelRecognition() {
@@ -219,7 +368,7 @@ public final class WakeWordService extends Service {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? new Notification.Builder(this, CHANNEL_ID) : new Notification.Builder(this);
-        return builder.setSmallIcon(android.R.drawable.ic_btn_speak_now)
+        return builder.setSmallIcon(R.drawable.ic_cip_notification)
                 .setContentTitle("Çip uyandırma sözcüğü")
                 .setContentText(status)
                 .setContentIntent(openPendingIntent)
@@ -245,6 +394,12 @@ public final class WakeWordService extends Service {
         if (speechRecognizer != null) {
             speechRecognizer.destroy();
             speechRecognizer = null;
+        }
+        assistantExecutor.shutdownNow();
+        if (textToSpeech != null) {
+            textToSpeech.stop();
+            textToSpeech.shutdown();
+            textToSpeech = null;
         }
         super.onDestroy();
     }

@@ -45,6 +45,7 @@ class AsistanYetenekTest(unittest.TestCase):
 
         self.assertEqual(response, "Ayrıntılı yanıt.")
         call = messages.create.call_args.kwargs
+        self.assertEqual(call["max_tokens"], voice_server.ASISTAN_MAX_YANIT_TOKEN)
         self.assertGreater(call["max_tokens"], 350)
         self.assertEqual(
             {tool["name"] for tool in call["tools"]},
