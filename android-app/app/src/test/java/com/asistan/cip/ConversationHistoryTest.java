@@ -20,6 +20,19 @@ public class ConversationHistoryTest {
     }
 
     @Test
+    public void preservesMessagesAndSpeakerAcrossSerialization() throws Exception {
+        ConversationHistory history = new ConversationHistory();
+        history.addTurn("Merhaba", "Selam!");
+
+        ConversationHistory restored = ConversationHistory.fromJson(history.toJson());
+
+        assertEquals(2, restored.entries().size());
+        assertEquals("Sen", restored.entries().get(0).sender);
+        assertEquals("Merhaba", restored.entries().get(0).text);
+        assertEquals("Çip", restored.entries().get(1).sender);
+    }
+
+    @Test
     public void keepsOnlyTheMostRecentTwentyTurns() throws Exception {
         ConversationHistory history = new ConversationHistory();
         for (int turn = 0; turn < 25; turn++) {
@@ -47,7 +60,6 @@ public class ConversationHistoryTest {
         history.addTurn("Benim adım Deniz", "Memnun oldum.");
         history.addTurn("Sohbet hafızasını temizle", "Yeni bir sayfa açtık.");
 
-        JSONArray messages = new JSONArray(history.toJson());
-        assertEquals(0, messages.length());
+        assertEquals(0, new JSONArray(history.toJson()).length());
     }
 }

@@ -198,6 +198,28 @@ class KimlikDogrulamaTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(command.call_args.args[1], history)
 
+    def test_komut_hata_yanitinda_saglayici_detaylarini_gizler_ve_loglar(self):
+        hata_detayi = "provider API error code=provider-secret-123"
+        with (
+            patch.dict(os.environ, {"ASISTAN_API_KEY": "test-key"}),
+            patch("voice_server.claude_cevap", side_effect=RuntimeError(hata_detayi)),
+            patch.object(voice_server.log, "error") as kayitlar,
+        ):
+            response = self.client.get(
+                "/komut?text=merhaba",
+                headers={"Authorization": "Bearer test-key"},
+            )
+
+        yanit = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "text/plain")
+        self.assertEqual(
+            yanit,
+            "Şu an yanıt oluşturamadım. Biraz sonra tekrar dener misin?",
+        )
+        self.assertNotIn(hata_detayi, yanit)
+        kayitlar.assert_called_once_with("Claude request failed (%s)", "RuntimeError")
+
     def test_ceviri_form_postunu_destekler(self):
         metin = "Merhaba " * 499 + "Merhaba"
         with (
