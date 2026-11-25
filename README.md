@@ -45,6 +45,30 @@ Ses yüklemeleri en fazla 25 MB olabilir.
 API anahtarı için en az 32 rastgele bayt kullan; örneğin Python'da
 `python -c "import secrets; print(secrets.token_urlsafe(32))"` komutuyla üret.
 
+## Sohbeti daha kullanışlı yapan yetenekler
+
+`/komut` sohbetinde Çip, gerektiğinde Claude'un araç çağrısıyla güvenli aritmetik
+hesaplayabilir ve şehir/yer için Open-Meteo üzerinden güncel hava durumunu
+getirebilir. Bu salt-okunur araçlar dışında sohbet modeline dosya, kabuk veya
+cihaz kontrol aracı verilmez; tek yanıt başına en fazla iki araç çağrısı ve iki
+araç turu yapılır. Basit sorular kısa yanıtlanır; ayrıntı veya adım adım açıklama
+istenince yanıt uzunluğu buna göre artar.
+
+Android istemcisi son 20 tamamlanmış sohbet turunu yalnızca geçici bellekten
+isteğe ekler. Böylece API istekleri farklı sunucu işçilerine düşse de uygulama
+açık olduğu sürece konuşma bağlamı korunur; bu geçmiş Android ayarlarına veya
+sunucu diskine kaydedilmez. “Sohbet hafızasını temizle” isteği istemcideki bu
+geçici geçmişi de siler.
+
+Android'de sürekli dinleme kullanıcı tarafından başlatılmış, mikrofon türünde
+ön plan hizmeti olarak sürerken uyandırma sözcüğünden sonraki sohbet komutu
+Activity'nin yeniden açılmasını beklemeden sunucuya gönderilir; Çip yanıtı sesli
+okur ve bildirimde işlem durumunu gösterir. Dosya seçme, arama ve takvim gibi
+Android sistem arayüzü veya kullanıcı onayı gerektiren eylemler, Android'in
+arka plan Activity kısıtlarına uyar ve bildirimden uygulamayı açmayı gerektirir.
+İşletim sistemi/pil yöneticisi mikrofon hizmetini durdurabilir; bildirimde
+dinleme durumunu kontrol et ve gerekirse Çip'te yeniden başlat.
+
 ## Windows çalışma alanı değişiklik planı
 
 `POST /workspace/plan` mevcut API anahtarıyla kimlik doğrular ve HTTPS gerektirir.

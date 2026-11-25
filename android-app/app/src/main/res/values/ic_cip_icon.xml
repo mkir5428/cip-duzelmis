@@ -1,0 +1,4 @@
+<resources>
+    <color name="cip_icon_background">#0B1722</color>
+    <item name="ic_cip_launcher" type="mipmap">@drawable/ic_cip_legacy</item>
+</resources>

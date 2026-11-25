@@ -86,12 +86,11 @@ public final class MainActivity extends Activity {
     private static final String PREFERENCES = "cip_settings";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_SESSION = "session_id";
-    private static final String KEY_CHAT_HISTORY = "chat_history";
     private static final String KEY_API_SECRET = "encrypted_api_key";
     private static final String KEYSTORE_ALIAS = "cip_api_key";
 
     private final ExecutorService network = Executors.newSingleThreadExecutor();
-    private ConversationHistory conversationHistory = new ConversationHistory();
+    private final ConversationHistory conversationHistory = ConversationHistory.shared();
     private SharedPreferences preferences;
     private LinearLayout conversation;
     private ScrollView conversationScroll;
@@ -101,6 +100,7 @@ public final class MainActivity extends Activity {
     private Button wakeWordButton;
     private TextView wakeIndicator;
     private TextView wakeStatus;
+    private TextView assistantThinking;
     private TextView transferStatus;
     private Button transferToggleButton;
     private LinearLayout transferContent;
@@ -120,6 +120,8 @@ public final class MainActivity extends Activity {
     private TransferCredentialStore transferCredentialStore;
     private final WindowsActionApproval transferApproval = new AndroidBiometricApproval();
     private final Handler transferHandler = new Handler(Looper.getMainLooper());
+    private final Handler assistantStatusHandler = new Handler(Looper.getMainLooper());
+    private int assistantThinkingDots;
     private TransferAction transferActionAwaitingSave;
     private File transferDownloadFile;
     private TransferAction transferActionAwaitingUpload;
@@ -135,13 +137,33 @@ public final class MainActivity extends Activity {
         }
     };
 
+    private final Runnable assistantThinkingRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!busy || assistantThinking == null) {
+                return;
+            }
+            assistantThinkingDots = (assistantThinkingDots + 1) % 4;
+            assistantThinking.setText("Çip düşünüyor" + ".".repeat(assistantThinkingDots));
+            assistantStatusHandler.postDelayed(this, 450);
+        }
+    };
+
     private final BroadcastReceiver wakeReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
             if (WakeWordService.ACTION_STATUS.equals(intent.getAction())) {
                 updateWakeStatus(intent.getStringExtra(WakeWordService.EXTRA_STATUS));
             } else if (WakeWordService.ACTION_COMMAND.equals(intent.getAction())) {
-                handlePendingWakeCommand(intent.getStringExtra(WakeWordService.EXTRA_COMMAND));
+                showWakeCommandStarted(intent.getStringExtra(WakeWordService.EXTRA_COMMAND));
+            } else if (WakeWordService.ACTION_LOCAL_COMMAND.equals(intent.getAction())) {
+                String command = intent.getStringExtra(WakeWordService.EXTRA_COMMAND);
+                preferences.edit().remove(WakeWordService.PENDING_NATIVE_COMMAND).apply();
+                handleAssistantCommand(command);
+            } else if (WakeWordService.ACTION_RESULT.equals(intent.getAction())) {
+                showWakeCommandResult(
+                        intent.getStringExtra(WakeWordService.EXTRA_COMMAND),
+                        intent.getStringExtra(WakeWordService.EXTRA_ANSWER));
             }
         }
     };
@@ -150,13 +172,6 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE);
-        try {
-            conversationHistory = ConversationHistory.fromJson(
-                    preferences.getString(KEY_CHAT_HISTORY, ""));
-        } catch (org.json.JSONException error) {
-            Log.w("Cip", "Saved conversation history could not be restored.", error);
-            preferences.edit().remove(KEY_CHAT_HISTORY).apply();
-        }
         transferCredentialStore = new TransferCredentialStore(preferences);
         if (preferences.getString(KEY_SESSION, null) == null) {
             preferences.edit().putString(KEY_SESSION, UUID.randomUUID().toString()).apply();
@@ -267,11 +282,16 @@ public final class MainActivity extends Activity {
         chatPanel.setElevation(dp(2));
         LinearLayout chatHeader = new LinearLayout(this);
         chatHeader.setGravity(Gravity.CENTER_VERTICAL);
+        android.widget.ImageView assistantLogo = new android.widget.ImageView(this);
+        assistantLogo.setImageResource(R.drawable.ic_cip_legacy);
+        assistantLogo.setContentDescription("Çip logosu");
+        chatHeader.addView(assistantLogo, new LinearLayout.LayoutParams(dp(34), dp(34)));
         TextView conversationTitle = new TextView(this);
         conversationTitle.setText(R.string.conversation_title);
         conversationTitle.setTextSize(17);
         conversationTitle.setTextColor(0xFFE8F1F6);
         conversationTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        conversationTitle.setPadding(dp(8), 0, 0, 0);
         chatHeader.addView(conversationTitle, new LinearLayout.LayoutParams(0, -2, 1));
         TextView onlineLabel = new TextView(this);
         onlineLabel.setText(R.string.conversation_ready);
@@ -279,6 +299,15 @@ public final class MainActivity extends Activity {
         onlineLabel.setTextColor(0xFF65E2B6);
         chatHeader.addView(onlineLabel);
         chatPanel.addView(chatHeader);
+
+        assistantThinking = new TextView(this);
+        assistantThinking.setText("Çip düşünüyor…");
+        assistantThinking.setTextSize(13);
+        assistantThinking.setTextColor(0xFF70E7BD);
+        assistantThinking.setPadding(dp(6), dp(6), dp(6), dp(2));
+        assistantThinking.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        assistantThinking.setVisibility(View.GONE);
+        chatPanel.addView(assistantThinking);
 
         conversation = new LinearLayout(this);
         conversation.setOrientation(LinearLayout.VERTICAL);
@@ -294,7 +323,7 @@ public final class MainActivity extends Activity {
         chatParams.bottomMargin = dp(12);
         root.addView(chatPanel, chatParams);
         if (conversationHistory.entries().isEmpty()) {
-            addMessage("Çip", getString(R.string.welcome_message));
+            renderMessage("Çip", getString(R.string.welcome_message));
         } else {
             for (ConversationHistory.Entry entry : conversationHistory.entries()) {
                 renderMessage(entry.sender, entry.text);
@@ -1289,7 +1318,8 @@ public final class MainActivity extends Activity {
         String localAnswer = DeviceTimeAnswerer.answer(text);
         if (localAnswer != null) {
             messageInput.setText("");
-            addMessage("Sen", text);
+            renderMessage("Sen", text);
+            conversationHistory.addTurn(text, localAnswer);
             pauseWakeWordService();
             showAnswer(localAnswer);
             return;
@@ -1297,7 +1327,7 @@ public final class MainActivity extends Activity {
         DeviceCommandRouter.Result localAction = DeviceCommandRouter.route(text);
         if (localAction != null) {
             messageInput.setText("");
-            addMessage("Sen", text);
+            renderMessage("Sen", text);
             launchDeviceAction(localAction.action, localAction.phoneNumber);
             return;
         }
@@ -1306,14 +1336,19 @@ public final class MainActivity extends Activity {
             return;
         }
         messageInput.setText("");
-        addMessage("Sen", text);
+        final String history = conversationHistory.toJson();
+        renderMessage("Sen", text);
         pauseWakeWordService();
         setBusy(true);
         final String command = text;
         network.execute(() -> {
             try {
-                String answer = postForm("/komut", "text", command, "session", sessionId());
-                runOnUiThread(() -> showAnswer(answer));
+                String answer = postForm(
+                        "/komut", "text", command, "session", sessionId(), "gecmis", history);
+                runOnUiThread(() -> {
+                    conversationHistory.addTurn(command, answer);
+                    showAnswer(answer);
+                });
             } catch (Exception error) {
                 runOnUiThread(() -> showError(error));
             } finally {
@@ -1414,18 +1449,29 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void handlePendingWakeCommand(String command) {
-        preferences.edit().remove(WakeWordService.PENDING_COMMAND).apply();
-        updateWakeStatus("Uyandırma sözcüğü algılandı.");
+    private void showWakeCommandStarted(String command) {
         if (command != null && !command.trim().isEmpty()) {
-            handleAssistantCommand(command);
+            renderMessage("Sen", command);
         }
+        setBusy(true);
+    }
+
+    private void showWakeCommandResult(String command, String answer) {
+        if (answer != null && !answer.isEmpty()) {
+            if (answer.startsWith("Şu an yanıt oluşturamadım.")
+                    || answer.startsWith("İstek tamamlanamadı.")) {
+                renderMessage("Hata", answer);
+            } else {
+                renderMessage("Çip", answer);
+            }
+        }
+        setBusy(false);
     }
 
     private void handleAssistantCommand(String command) {
         DeviceCommandRouter.Result result = DeviceCommandRouter.route(command);
         if (result != null) {
-            addMessage("Sen", command);
+            renderMessage("Sen", command);
             pauseWakeWordService();
             launchDeviceAction(result.action, result.phoneNumber);
             return;
@@ -1585,15 +1631,19 @@ public final class MainActivity extends Activity {
 
     private void uploadRecording(File audioFile) {
         setBusy(true);
-        addMessage("Sen", "🎙 Ses gönderiliyor...");
+        final String history = conversationHistory.toJson();
+        renderMessage("Sen", "🎙 Ses gönderiliyor...");
         network.execute(() -> {
             try {
-                JSONObject result = postAudio(audioFile);
+                JSONObject result = postAudio(audioFile, history);
                 String transcript = result.optString("transkript", "");
                 String answer = result.optString("cevap", "");
                 runOnUiThread(() -> {
                     if (!transcript.isEmpty()) {
-                        addMessage("Sen", transcript);
+                        if (!answer.isEmpty()) {
+                            conversationHistory.addTurn(transcript, answer);
+                        }
+                        renderMessage("Sen", transcript);
                     }
                     showAnswer(answer.isEmpty() ? "Bir yanıt alınamadı." : answer);
                 });
@@ -1624,7 +1674,7 @@ public final class MainActivity extends Activity {
         return readResponse(connection);
     }
 
-    private JSONObject postAudio(File audioFile) throws Exception {
+    private JSONObject postAudio(File audioFile, String history) throws Exception {
         String boundary = "CipBoundary" + UUID.randomUUID().toString().replace("-", "");
         HttpURLConnection connection = openConnection("/ses?format=json");
         connection.setRequestMethod("POST");
@@ -1633,6 +1683,7 @@ public final class MainActivity extends Activity {
         try (OutputStream output = connection.getOutputStream();
              FileInputStream input = new FileInputStream(audioFile)) {
             writeFormPart(output, boundary, "session", sessionId());
+            writeFormPart(output, boundary, "gecmis", history);
             output.write(("--" + boundary + "\r\n"
                     + "Content-Disposition: form-data; name=\"file\"; filename=\"recording.m4a\"\r\n"
                     + "Content-Type: audio/mp4\r\n\r\n").getBytes(StandardCharsets.UTF_8));
@@ -1689,7 +1740,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showAnswer(String answer) {
-        addMessage("Çip", answer);
+        renderMessage("Çip", answer);
         if (ttsReady && !answer.isEmpty()) {
             int result = textToSpeech.speak(answer, TextToSpeech.QUEUE_FLUSH, null, "cip-answer");
             if (result == TextToSpeech.ERROR) {
@@ -1708,11 +1759,6 @@ public final class MainActivity extends Activity {
 
     private void addMessage(String sender, String text) {
         conversationHistory.append(sender, text);
-        try {
-            preferences.edit().putString(KEY_CHAT_HISTORY, conversationHistory.toJson()).apply();
-        } catch (org.json.JSONException error) {
-            Log.e("Cip", "Conversation history could not be saved.", error);
-        }
         renderMessage(sender, text);
     }
 
@@ -1778,6 +1824,15 @@ public final class MainActivity extends Activity {
         recordButton.setEnabled(!value);
         sendButton.setText(value ? "Bekle..." : "Gönder");
         sendButton.setAlpha(value ? 0.65f : 1f);
+        if (assistantThinking != null) {
+            assistantStatusHandler.removeCallbacks(assistantThinkingRunnable);
+            assistantThinking.setVisibility(value ? View.VISIBLE : View.GONE);
+            if (value) {
+                assistantThinkingDots = 0;
+                assistantThinking.setText("Çip düşünüyor");
+                assistantStatusHandler.postDelayed(assistantThinkingRunnable, 450);
+            }
+        }
     }
 
     private boolean ensureConfigured() {
@@ -1924,6 +1979,8 @@ public final class MainActivity extends Activity {
         IntentFilter filter = new IntentFilter();
         filter.addAction(WakeWordService.ACTION_STATUS);
         filter.addAction(WakeWordService.ACTION_COMMAND);
+        filter.addAction(WakeWordService.ACTION_LOCAL_COMMAND);
+        filter.addAction(WakeWordService.ACTION_RESULT);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(wakeReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
@@ -1938,9 +1995,11 @@ public final class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        String pendingCommand = preferences.getString(WakeWordService.PENDING_COMMAND, "");
-        if (!pendingCommand.isEmpty()) {
-            handlePendingWakeCommand(pendingCommand);
+        String pendingNativeCommand = preferences.getString(
+                WakeWordService.PENDING_NATIVE_COMMAND, "");
+        if (!pendingNativeCommand.isEmpty()) {
+            preferences.edit().remove(WakeWordService.PENDING_NATIVE_COMMAND).apply();
+            handleAssistantCommand(pendingNativeCommand);
         }
         transferPollEnabled = true;
         transferHandler.removeCallbacks(transferPollRunnable);
@@ -2009,6 +2068,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         transferHandler.removeCallbacksAndMessages(null);
+        assistantStatusHandler.removeCallbacksAndMessages(null);
         if (isFinishing()) {
             deletePendingTransferDownload();
             deletePendingTransferUpload();
